@@ -1,0 +1,12 @@
+#!/usr/bin/awk -f
+#
+# <=     message arrival
+# (=     message fakereject
+# =>     normal message delivery
+# ->     additional address in same delivery
+# >>     cutthrough message delivery
+# *>     delivery suppressed by -N
+# **     delivery failed; address bounced
+# ==     delivery deferred; temporary problem
+
+
