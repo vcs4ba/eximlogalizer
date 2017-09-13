@@ -1,12 +1,91 @@
 #!/usr/bin/awk -f
-#
-# <=     message arrival
-# (=     message fakereject
-# =>     normal message delivery
-# ->     additional address in same delivery
-# >>     cutthrough message delivery
-# *>     delivery suppressed by -N
-# **     delivery failed; address bounced
-# ==     delivery deferred; temporary problem
 
+function qid2unixtime (exim_queue_id) {
+    exponential = utime = 0
+    a = split("0123465789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",base62,"")
+    split(exim_queue_id,date_in_eximqueue,"-")
+    split(date_in_eximqueue[1],date_in_base62,"")
 
+    for ( ix = length(date_in_base62) ; ix >= 1 ; ix-- ) {
+        for ( digit in base62 ) {
+            if ( base62[digit] ~ date_in_base62[ix] ) {
+                utime = utime +  (digit-1) * a ^ exponential
+            }
+        }
+        exponential++
+    }
+    return utime
+}
+
+$3 ~ /[0-9a-zA-Z]{6}-[0-9a-zA-Z]{6}-[0-9a-zA-Z]{2}/ {
+
+    finish = $1" "$2
+
+    switch ( $4 ) {
+        case /^<=$/:
+        if ( $7 !~ /^U=Debian-exim$/ ) {
+            # print message arrival
+            # [ id, to ] = from
+            if ( NF > 13 ) {
+                for(i=13; i<=NF; i++) presqldata[$3,$i] = $9
+            } else {
+                presqldata[$3,$13] = $9
+            }
+        }
+        break
+        case /^\(=$/:
+        print "message fakereject"
+        break
+        case /^(=>|->)$/:
+        # print "normal message delivery"
+        # print "additional address in same delivery"
+        # id, to
+        if ( $7 !~ /^R=local_user$/ && $7 !~ /T=mail_spool/ ) {
+            if ( ( $3, $5 ) in presqldata ) {
+                user = presqldata[$3,$5]
+                sub(/^id=/, "", user) ; sub(/--.*/, "", user)
+                sqldata["sc", finish, $3, $5, user] = 0
+            } else {
+                sqldata["sc", finish, $3, $5] = 0
+            }
+        }
+        break
+        case /^>>$/:
+        # print "cutthrough message delivery"
+        break
+        case /^i\*>$/:
+        # print "delivery suppressed by -N"
+        break
+        case /^**$/:
+        # print "delivery failed; address bounced"
+        if ( ( $3, $5 ) in presqldata ) {
+            user = presqldata[$3,$5]
+            sub(/^id=/, "", user) ; sub(/--.*/, "", user)
+            sub(/:$/, "", $5)
+            sqldata["bc", finish, $3, $5, user] = 1
+        } else {
+            sub(/:$/, "", $5)
+            sqldata["bc", finish, $3, $5] = 1
+        }
+        break
+        case /^==$/:
+        # print "delivery deferred; temporary problem"
+        break
+        # default:
+        # print $0
+    }
+}
+
+END {
+    print "START TRANSACTION;"
+    for (datarow in sqldata) {
+        split(datarow, splited, SUBSEP)
+        long=length(splited)
+        if ( long == 4 && splited[4] ~ /^atw$/ ) continue
+
+            print "INSERT INTO `queue` (id,queueid,start,finish,result) VALUES (NULL, '"splited[3]"', '"qid2unixtime(splited[3])"', UNIX_TIMESTAMP('"splited[2]"'), '"splited[1]"') ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id);"
+            print "INSERT INTO `rcpt` (id,email) VALUES (LAST_INSERT_ID(), '"splited[4]"') ON DUPLICATE KEY UPDATE `email`='"splited[4]"';"
+            print "INSERT INTO `sender` (id,user) VALUES (LAST_INSERT_ID(), '"splited[5]"') ON DUPLICATE KEY UPDATE `user`='"splited[5]"';"
+    }
+    print "COMMIT;"
+}
